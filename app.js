@@ -1,108 +1,123 @@
-// --- VARIABLES GLOBALES ET DOM ---
-const peer = new Peer(); // Initialisation de WebRTC
+// ==========================================
+// 🛠️ VARIABLES GLOBALES ET INITIALISATION
+// ==========================================
+
+// Instance de PeerJS (WebRTC)
+// Nous n'initialisons pas l'instance tout de suite, car l'Hôte a besoin d'un ID court avant.
+let peer = null;
 let myPeerId = null;
 let isHost = false;
-let hostConnection = null; // Pour les clients
-let clientConnections = []; // Pour l'hôte
 
-// Elements DOM
+// Pour les clients : la connexion active avec l'hôte
+let hostConnection = null;
+// Pour l'hôte : la liste des connexions actives avec les clients
+let clientConnections = [];
+
+// Éléments du DOM (on les récupère une fois pour toutes)
 const views = {
     home: document.getElementById('view-home'),
     lobby: document.getElementById('view-lobby'),
     game: document.getElementById('view-game'),
     leaderboard: document.getElementById('view-leaderboard')
 };
+const audio = document.getElementById('audio-player');
+const inputAnswer = document.getElementById('input-answer');
+const feedbackMessage = document.getElementById('feedback-message');
+const timerBar = document.getElementById('timer-bar');
 
-// --- UTILITAIRES (Orthographe) ---
-// Enlève les accents, met en minuscule
-function normalizeStr(str) {
-    return str.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
-}
+// Variables de jeu (utilisées par l'hôte et le client)
+const MAX_ROUNDS = 5;
+const ROUND_DURATION = 30000; // 30 secondes en millisecondes
 
-// Calcule la distance de Levenshtein entre deux mots
-function getLevenshteinDistance(a, b) {
-    const matrix = [];
-    for (let i = 0; i <= b.length; i++) { matrix[i] = [i]; }
-    for (let j = 0; j <= a.length; j++) { matrix[0][j] = j; }
-    for (let i = 1; i <= b.length; i++) {
-        for (let j = 1; j <= a.length; j++) {
-            if (b.charAt(i - 1) === a.charAt(j - 1)) {
-                matrix[i][j] = matrix[i - 1][j - 1];
-            } else {
-                matrix[i][j] = Math.min(matrix[i - 1][j - 1] + 1, Math.min(matrix[i][j - 1] + 1, matrix[i - 1][j] + 1));
-            }
-        }
+// --- FONCTION UTILITAIRE : Générer un ID court (6 caractères) ---
+// Utilise des lettres majuscules et des chiffres pour une meilleure lisibilité.
+function generateShortId(length = 6) {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    let id = '';
+    for (let i = 0; i < length; i++) {
+        id += chars.charAt(Math.floor(Math.random() * chars.length));
     }
-    return matrix[b.length][a.length];
+    return id;
 }
-
-// Vérifie si la réponse est proche de la cible (tolérance de 2 erreurs)
-function isAnswerCorrect(input, target) {
-    const normInput = normalizeStr(input);
-    const normTarget = normalizeStr(target);
-    // Vérification exacte, inclusion, ou distance faible
-    if (normTarget.includes(normInput) && normInput.length > 3) return true; 
-    return getLevenshteinDistance(normInput, normTarget) <= 2;
-}
-
-// --- GESTION DES VUES ---
-function showView(viewName) {
-    Object.values(views).forEach(v => v.classList.remove('active'));
-    views[viewName].classList.add('active');
-}
-
-// --- INITIALISATION PEERJS ---
-peer.on('open', (id) => {
-    myPeerId = id;
-    console.log('Mon Peer ID :', myPeerId);
-});
-
 
 // ==========================================
 // 👑 LOGIQUE DE L'HÔTE (Le "Serveur")
 // ==========================================
+
+// État du jeu géré par l'hôte
 let gameState = {
     players: {}, // { peerId: { name: "Joueur 1", score: 0 } }
     playlist: [],
     currentRound: 0,
-    roundActive: false
+    roundActive: false,
+    roundStartTime: null
 };
 
+// --- ACTION : L'utilisateur veut CRÉER une room ---
 document.getElementById('btn-create').addEventListener('click', () => {
     isHost = true;
-    gameState.players[myPeerId] = { name: "Hôte", score: 0 };
-    document.getElementById('display-room-id').innerText = myPeerId;
-    document.getElementById('btn-start-game').style.display = 'block';
-    showView('lobby');
-    updateLobbyUI();
-});
+    
+    // 1. Générer l'ID court de la room
+    const shortRoomId = generateShortId(6);
+    
+    // 2. Initialiser l'instance Peer avec cet ID court spécifique
+    // C'est le FIX TECHNIQUE : l'hôte s'enregistre avec l'ID court.
+    peer = new Peer(shortRoomId);
 
-// Quand un client se connecte à l'hôte
-peer.on('connection', (conn) => {
-    if (!isHost) return;
-    
-    clientConnections.push(conn);
-    gameState.players[conn.peer] = { name: "Joueur " + (clientConnections.length + 1), score: 0 };
-    
-    conn.on('open', () => {
-        // Envoie l'état initial au client
-        broadcastState({ type: 'LOBBY_UPDATE', players: gameState.players });
+    // Quand l'hôte s'est bien enregistré avec l'ID court
+    peer.on('open', (id) => {
+        myPeerId = id;
+        console.log('✅ Hôte enregistré avec l\'ID :', myPeerId);
+        
+        // Mettre à jour l'interface
+        gameState.players[myPeerId] = { name: "Hôte", score: 0 };
+        document.getElementById('display-room-id').innerText = myPeerId;
+        document.getElementById('btn-start-game').style.display = 'block'; // Activer le bouton de lancement
+        showView('lobby');
         updateLobbyUI();
     });
 
-    // Quand l'hôte reçoit des données (ex: une réponse) d'un client
-    conn.on('data', (data) => {
-        if (data.type === 'SUBMIT_ANSWER' && gameState.roundActive) {
-            checkAnswer(conn.peer, data.answer);
-        }
+    // Écouter les erreurs PeerJS (très important pour le debug)
+    peer.on('error', (err) => {
+        console.error('❌ Erreur PeerJS Hôte:', err);
+        alert('Erreur PeerJS, réessayez. Détails: ' + err.type);
+        showView('home'); // Retour à l'accueil en cas d'erreur
+    });
+
+    // --- LOGIQUE HÔTE : Quand un client tente de se connecter ---
+    peer.on('connection', (conn) => {
+        if (!isHost) return;
+        
+        console.log('🔗 Connexion d\'un client reçue :', conn.peer);
+        clientConnections.push(conn);
+        gameState.players[conn.peer] = { name: "Joueur " + (clientConnections.length + 1), score: 0 };
+        
+        conn.on('open', () => {
+            console.log('✅ Connexion client ouverte.');
+            // Envoie l'état initial du lobby au nouveau client
+            broadcastState({ type: 'LOBBY_UPDATE', players: gameState.players });
+            updateLobbyUI();
+        });
+
+        // Quand l'hôte reçoit des données (ex: une réponse) d'un client
+        conn.on('data', (data) => {
+            if (data.type === 'SUBMIT_ANSWER' && gameState.roundActive) {
+                checkAnswer(conn.peer, data.answer);
+            }
+        });
     });
 });
 
-// Envoie un message à tous les clients
+// Envoie un message à tous les clients connectés
 function broadcastState(data) {
-    clientConnections.forEach(conn => conn.send(data));
+    clientConnections.forEach(conn => {
+        if (conn.open) {
+            conn.send(data);
+        }
+    });
 }
 
+// Met à jour la liste des joueurs dans le lobby de l'hôte
 function updateLobbyUI() {
     const list = document.getElementById('players-list');
     list.innerHTML = '';
@@ -111,28 +126,41 @@ function updateLobbyUI() {
     });
 }
 
-// Lancement du jeu par l'hôte
+// --- LOGIQUE HÔTE : Lancer la partie ---
 document.getElementById('btn-start-game').addEventListener('click', async () => {
     // 1. Récupérer des musiques via l'API iTunes
-    const res = await fetch('https://itunes.apple.com/search?term=hits&media=music&limit=10');
-    const data = await res.json();
-    gameState.playlist = data.results.filter(track => track.previewUrl); // Garde seulement celles avec audio
-    
-    gameState.currentRound = 0;
-    startNextRound();
+    try {
+        const res = await fetch('https://itunes.apple.com/search?term=pop+hits&media=music&limit=15');
+        const data = await res.json();
+        gameState.playlist = data.results.filter(track => track.previewUrl);
+        
+        if (gameState.playlist.length < MAX_ROUNDS) {
+            alert('Pas assez de musiques trouvées, réessayez plus tard.');
+            return;
+        }
+
+        console.log('🎵 Playlist prête :', gameState.playlist);
+        gameState.currentRound = 0;
+        startNextRound();
+        
+    } catch (err) {
+        console.error('❌ Erreur API iTunes:', err);
+        alert('Erreur de réseau lors de la récupération des musiques.');
+    }
 });
 
 function startNextRound() {
-    if (gameState.currentRound >= 5 || gameState.currentRound >= gameState.playlist.length) {
+    if (gameState.currentRound >= MAX_ROUNDS || gameState.currentRound >= gameState.playlist.length) {
         return endGame();
     }
     
     gameState.roundActive = true;
+    gameState.roundStartTime = Date.now();
     const track = gameState.playlist[gameState.currentRound];
     
-    // Joue l'audio chez l'hôte (les clients devront peut-être l'écouter via le téléphone de l'hôte, 
-    // ou on peut envoyer l'URL pour qu'ils jouent l'audio en sync. Faisons simple : l'hôte joue la musique)
-    const audio = document.getElementById('audio-player');
+    console.log(`Manche ${gameState.currentRound + 1} démarrée. Cible : ${track.trackName} - ${track.artistName}`);
+    
+    // L'hôte joue la musique (haute voix)
     audio.src = track.previewUrl;
     audio.play();
 
@@ -140,31 +168,42 @@ function startNextRound() {
     broadcastState({ 
         type: 'START_ROUND', 
         round: gameState.currentRound + 1,
-        // Optionnel: previewUrl: track.previewUrl si tu veux que la musique sorte du tel des clients
+        maxRounds: MAX_ROUNDS
     });
 
     showView('game');
-    document.getElementById('round-info').innerText = `Manche ${gameState.currentRound + 1}/5`;
+    document.getElementById('round-info').innerText = `Manche ${gameState.currentRound + 1}/${MAX_ROUNDS}`;
 }
 
-// Validation de la réponse par l'hôte
+// --- LOGIQUE HÔTE : Vérification de la réponse ---
 function checkAnswer(peerId, answer) {
     const track = gameState.playlist[gameState.currentRound];
     const targetTitle = track.trackName;
     const targetArtist = track.artistName;
 
-    if (isAnswerCorrect(answer, targetTitle) || isAnswerCorrect(answer, targetArtist)) {
+    // TODO : Activer la distance de Levenshtein ici après les tests de connexion
+    // if (isAnswerCorrect(answer, targetTitle) || isAnswerCorrect(answer, targetArtist)) {
+    
+    // Version simple pour le test initial (exact match, insensible à la casse et espaces)
+    const normInput = answer.toLowerCase().trim();
+    const normTitle = targetTitle.toLowerCase().trim();
+    const normArtist = targetArtist.toLowerCase().trim();
+
+    if (normInput === normTitle || normInput === normArtist) {
         gameState.roundActive = false;
         gameState.players[peerId].score += 10; // +10 points pour le plus rapide
         
-        document.getElementById('audio-player').pause();
+        audio.pause();
         
+        // Notifier tout le monde que la manche est finie
         broadcastState({ 
             type: 'ROUND_WON', 
             winner: gameState.players[peerId].name, 
             track: `${targetTitle} - ${targetArtist}`,
             players: gameState.players
         });
+
+        console.log('🏆 Manche gagnée par :', gameState.players[peerId].name);
 
         // Manche suivante après 4 secondes
         setTimeout(() => {
@@ -175,6 +214,7 @@ function checkAnswer(peerId, answer) {
 }
 
 function endGame() {
+    console.log('🏁 Partie terminée.');
     broadcastState({ type: 'END_GAME', players: gameState.players });
     showLeaderboard(gameState.players);
 }
@@ -184,56 +224,122 @@ function endGame() {
 // 📱 LOGIQUE DU CLIENT
 // ==========================================
 
+// --- ACTION : L'utilisateur veut REJOINDRE une room ---
 document.getElementById('btn-join').addEventListener('click', () => {
-    const hostId = document.getElementById('input-join-id').value;
-    if (!hostId) return alert('Entrez un ID !');
+    isHost = false;
+    const inputId = document.getElementById('input-join-id').value.toUpperCase().trim();
+    if (!inputId) return alert('Entrez le code de la room !');
 
-    // Connexion à l'hôte
-    hostConnection = peer.connect(hostId);
+    // 1. Initialiser une instance Peer simple (le client n'a pas besoin d'ID court)
+    peer = new Peer();
 
-    hostConnection.on('open', () => {
-        showView('lobby');
+    peer.on('open', (id) => {
+        myPeerId = id;
+        console.log('✅ Client enregistré avec l\'ID :', myPeerId);
+        
+        // 2. Tenter la connexion à l'hôte via son ID court
+        hostConnection = peer.connect(inputId);
+        console.log('🔗 Tentative de connexion à l\'hôte :', inputId);
+
+        hostConnection.on('open', () => {
+            console.log('✅ Connecté à l\'hôte !');
+            showView('lobby'); // Afficher le lobby, l'Hôte va envoyer les mises à jour
+        });
+
+        // --- LOGIQUE CLIENT : Écouter les données envoyées par l'hôte ---
+        hostConnection.on('data', (data) => {
+            if (data.type === 'LOBBY_UPDATE') {
+                const list = document.getElementById('players-list');
+                list.innerHTML = '';
+                Object.values(data.players).forEach(p => list.innerHTML += `<li>${p.name}</li>`);
+            }
+            
+            if (data.type === 'START_ROUND') {
+                showView('game');
+                document.getElementById('round-info').innerText = `Manche ${data.round}/${data.maxRounds}`;
+                feedbackMessage.innerText = "À vous de jouer !";
+                feedbackMessage.style.color = "white";
+                inputAnswer.value = '';
+                inputAnswer.focus(); // Met le focus sur le champ pour mobile
+
+                // Activer le chronomètre visuel (côté client)
+                resetTimer();
+                startTimer(ROUND_DURATION);
+            }
+
+            if (data.type === 'ROUND_WON') {
+                feedbackMessage.innerText = `🏆 Gagné par ${data.winner} ! \nC'était : ${data.track}`;
+                feedbackMessage.style.color = "#1db954"; // Vert
+                resetTimer();
+            }
+
+            if (data.type === 'END_GAME') {
+                showLeaderboard(data.players);
+                resetTimer();
+            }
+        });
     });
 
-    // Écoute les ordres de l'hôte
-    hostConnection.on('data', (data) => {
-        if (data.type === 'LOBBY_UPDATE') {
-            const list = document.getElementById('players-list');
-            list.innerHTML = '';
-            Object.values(data.players).forEach(p => list.innerHTML += `<li>${p.name}</li>`);
+    // Écouter les erreurs PeerJS (client)
+    peer.on('error', (err) => {
+        console.error('❌ Erreur PeerJS Client:', err);
+        if (err.type === 'peer-not-found') {
+            alert('Code de room introuvable. L\'hôte a-t-il créé la room ?');
+        } else {
+            alert('Erreur PeerJS, réessayez.');
         }
-        
-        if (data.type === 'START_ROUND') {
-            showView('game');
-            document.getElementById('round-info').innerText = `Manche ${data.round}/5`;
-            document.getElementById('feedback-message').innerText = "À vous de jouer !";
-            document.getElementById('input-answer').value = '';
-        }
-
-        if (data.type === 'ROUND_WON') {
-            document.getElementById('feedback-message').innerText = 
-                `Gagné par ${data.winner} ! C'était : ${data.track}`;
-        }
-
-        if (data.type === 'END_GAME') {
-            showLeaderboard(data.players);
-        }
+        showView('home');
     });
 });
 
 // Le client envoie sa réponse
 document.getElementById('btn-submit-answer').addEventListener('click', () => {
-    const answer = document.getElementById('input-answer').value;
+    const answer = inputAnswer.value;
     if (hostConnection && hostConnection.open) {
         hostConnection.send({ type: 'SUBMIT_ANSWER', answer: answer });
-        document.getElementById('input-answer').value = ''; // On vide le champ
+        inputAnswer.value = ''; // On vide le champ
+        feedbackMessage.innerText = "Réponse envoyée, en attente de validation...";
     }
 });
 
 
 // ==========================================
-// 🏆 FONCTION COMMUNE (LEADERBOARD)
+// 🏆 FONCTION COMMUNE (INTERFACE ET CHRONO)
 // ==========================================
+
+// Gestionnaire du chronomètre (pour les clients)
+let timerInterval = null;
+
+function resetTimer() {
+    if (timerInterval) clearInterval(timerInterval);
+    timerBar.style.width = '100%';
+}
+
+function startTimer(duration) {
+    const startTime = Date.now();
+    timerInterval = setInterval(() => {
+        const elapsed = Date.now() - startTime;
+        const remaining = duration - elapsed;
+        
+        if (remaining <= 0) {
+            clearInterval(timerInterval);
+            timerBar.style.width = '0%';
+            feedbackMessage.innerText = "Temps écoulé !";
+            feedbackMessage.style.color = "orange";
+        } else {
+            const percentage = (remaining / duration) * 100;
+            timerBar.style.width = percentage + '%';
+        }
+    }, 100); // Mise à jour toutes les 100ms pour une fluidité mobile
+}
+
+// Fonction utilitaire pour changer de vue
+function showView(viewName) {
+    Object.values(views).forEach(v => v.classList.remove('active'));
+    views[viewName].classList.add('active');
+}
+
+// Affiche le classement final pour tout le monde
 function showLeaderboard(playersData) {
     showView('leaderboard');
     const list = document.getElementById('leaderboard-list');
@@ -242,7 +348,7 @@ function showLeaderboard(playersData) {
     // Tri des joueurs par score décroissant
     const sortedPlayers = Object.values(playersData).sort((a, b) => b.score - a.score);
     
-    sortedPlayers.forEach(p => {
-        list.innerHTML += `<li><strong>${p.name}</strong> : ${p.score} pts</li>`;
+    sortedPlayers.forEach((p, index) => {
+        list.innerHTML += `<li><strong>#${index + 1} ${p.name}</strong> : ${p.score} pts</li>`;
     });
-    }
+                                             }
