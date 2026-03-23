@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>P2P Blindtest</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+</head>
+<body>
+    <div id="app">
+        <h1>🎵 Blindtest P2P</h1>
+
+        <div id="view-home" class="view active">
+            <button id="btn-create" class="btn primary">Créer une room (Hôte)</button>
+            <hr>
+            <input type="text" id="input-join-id" placeholder="Entrez le code de la room">
+            <button id="btn-join" class="btn secondary">Rejoindre une room (Client)</button>
+        </div>
+
+        <div id="view-lobby" class="view">
+            <h2>Lobby</h2>
+            <p>ID de la room à partager : <strong id="display-room-id">...</strong></p>
+            <h3>Joueurs connectés :</h3>
+            <ul id="players-list"></ul>
+            <button id="btn-start-game" class="btn primary" style="display:none;">Lancer la partie !</button>
+        </div>
+
+        <div id="view-game" class="view">
+            <h2 id="round-info">Manche 1/5</h2>
+            
+            <audio id="audio-player" controls style="display:none;"></audio>
+            
+            <div id="client-controls">
+                <input type="text" id="input-answer" placeholder="Titre ou Artiste ?">
+                <button id="btn-submit-answer" class="btn primary">Valider</button>
+            </div>
+            <p id="feedback-message"></p>
+        </div>
+
+        <div id="view-leaderboard" class="view">
+            <h2>🏆 Classement Final</h2>
+            <ol id="leaderboard-list"></ol>
+            <button id="btn-home" class="btn secondary">Retour à l'accueil</button>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
