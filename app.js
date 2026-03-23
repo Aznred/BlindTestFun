@@ -21,17 +21,14 @@ const feedbackMessage = document.getElementById('feedback-message');
 const timerBar = document.getElementById('timer-bar');
 
 const MAX_ROUNDS = 5;
-const ROUND_DURATION = 30000; 
+const ROUND_DURATION = 30000; // 30 secondes
 
-// 🔥 LE FIX EST ICI : Configuration des serveurs STUN publics de Google
+// Configuration des serveurs STUN publics de Google
 const peerConfig = {
     config: {
         'iceServers': [
             { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-            { urls: 'stun:stun2.l.google.com:19302' },
-            { urls: 'stun:stun3.l.google.com:19302' },
-            { urls: 'stun:stun4.l.google.com:19302' }
+            { urls: 'stun:stun1.l.google.com:19302' }
         ]
     }
 };
@@ -58,7 +55,11 @@ let gameState = {
     players: {}, 
     playlist: [],
     currentRound: 0,
-    roundActive: false
+    roundActive: false,
+    hostTimeout: null, // Le chrono géré par l'hôte
+    // Suivi des découvertes pour la manche en cours
+    titleFound: false,
+    artistFound: false
 };
 
 document.getElementById('btn-create').addEventListener('click', () => {
@@ -71,7 +72,6 @@ document.getElementById('btn-create').addEventListener('click', () => {
     if (peer) peer.destroy();
 
     const shortRoomId = generateShortId(6);
-    // On passe la configuration STUN ici
     peer = new Peer(shortRoomId, peerConfig);
 
     peer.on('open', (id) => {
@@ -104,11 +104,8 @@ document.getElementById('btn-create').addEventListener('click', () => {
             }
         };
 
-        if (conn.open) {
-            setupClient();
-        } else {
-            conn.on('open', setupClient);
-        }
+        if (conn.open) setupClient();
+        else conn.on('open', setupClient);
 
         conn.on('data', (data) => {
             if (data.type === 'SUBMIT_ANSWER' && gameState.roundActive) {
@@ -152,7 +149,11 @@ function startNextRound() {
         return endGame();
     }
     
+    // Réinitialisation de la manche
     gameState.roundActive = true;
+    gameState.titleFound = false;
+    gameState.artistFound = false;
+    
     const track = gameState.playlist[gameState.currentRound];
     
     audio.src = track.previewUrl;
@@ -166,33 +167,90 @@ function startNextRound() {
 
     showView('game');
     document.getElementById('round-info').innerText = `Manche ${gameState.currentRound + 1}/${MAX_ROUNDS}`;
+
+    // Le VRAI chronomètre géré par l'hôte
+    clearTimeout(gameState.hostTimeout);
+    gameState.hostTimeout = setTimeout(() => {
+        endRoundTimeout();
+    }, ROUND_DURATION);
+}
+
+// Fonction appelée quand le temps est écoulé sans que tout soit trouvé
+function endRoundTimeout() {
+    gameState.roundActive = false;
+    audio.pause();
+    
+    const track = gameState.playlist[gameState.currentRound];
+    
+    broadcastState({ 
+        type: 'ROUND_TIMEOUT', 
+        track: `${track.trackName} - ${track.artistName}`
+    });
+
+    // On passe à la manche suivante après 5 secondes pour lire la réponse
+    setTimeout(() => {
+        gameState.currentRound++;
+        startNextRound();
+    }, 5000);
 }
 
 function checkAnswer(peerId, answer) {
     const track = gameState.playlist[gameState.currentRound];
-    
     const normInput = answer.toLowerCase().trim();
     const normTitle = track.trackName.toLowerCase().trim();
     const normArtist = track.artistName.toLowerCase().trim();
 
-    if (normTitle.includes(normInput) || normArtist.includes(normInput)) {
-        if (normInput.length < 3) return;
+    if (normInput.length < 3) return;
 
-        gameState.roundActive = false;
-        gameState.players[peerId].score += 10;
-        audio.pause();
+    let pointsEarned = 0;
+    let messageToBroadcast = "";
+    const playerName = gameState.players[peerId].name;
+
+    // Vérification du TITRE
+    if (!gameState.titleFound && normTitle.includes(normInput)) {
+        gameState.titleFound = true;
+        gameState.players[peerId].score += 1;
+        pointsEarned += 1;
+        messageToBroadcast += `🎵 ${playerName} a trouvé le Titre ! `;
+    }
+
+    // Vérification de l'ARTISTE
+    if (!gameState.artistFound && normArtist.includes(normInput)) {
+        gameState.artistFound = true;
+        gameState.players[peerId].score += 1;
+        pointsEarned += 1;
+        messageToBroadcast += `🎤 ${playerName} a trouvé l'Artiste ! `;
+    }
+
+    // Si des points ont été marqués
+    if (pointsEarned > 0) {
         
-        broadcastState({ 
-            type: 'ROUND_WON', 
-            winner: gameState.players[peerId].name, 
-            track: `${track.trackName} - ${track.artistName}`,
-            players: gameState.players
-        });
+        // Si TOUT a été trouvé (Titre ET Artiste), la manche s'arrête
+        if (gameState.titleFound && gameState.artistFound) {
+            gameState.roundActive = false;
+            clearTimeout(gameState.hostTimeout); // On coupe le chrono de l'hôte
+            audio.pause();
+            
+            broadcastState({ 
+                type: 'ROUND_WON_COMPLETELY', 
+                message: messageToBroadcast,
+                track: `${track.trackName} - ${track.artistName}`,
+                players: gameState.players
+            });
 
-        setTimeout(() => {
-            gameState.currentRound++;
-            startNextRound();
-        }, 4000);
+            setTimeout(() => {
+                gameState.currentRound++;
+                startNextRound();
+            }, 5000);
+        } 
+        // Si SEULEMENT l'un des deux a été trouvé, la manche continue
+        else {
+            broadcastState({ 
+                type: 'PARTIAL_WIN', 
+                message: messageToBroadcast,
+                players: gameState.players
+            });
+        }
     }
 }
 
@@ -212,12 +270,11 @@ document.getElementById('btn-join').addEventListener('click', () => {
     if (!inputId) return alert('Entrez le code de la room !');
 
     const btnJoin = document.getElementById('btn-join');
-    btnJoin.innerText = "Connexion en cours...";
+    btnJoin.innerText = "Connexion...";
     btnJoin.disabled = true;
 
     if (peer) peer.destroy();
     
-    // On passe la configuration STUN ici aussi
     peer = new Peer(peerConfig);
 
     peer.on('open', (id) => {
@@ -225,14 +282,14 @@ document.getElementById('btn-join').addEventListener('click', () => {
         hostConnection = peer.connect(inputId, { reliable: true });
 
         let timeout = setTimeout(() => {
-            alert("Code incorrect, hôte introuvable, ou pare-feu trop strict.");
-            btnJoin.innerText = "Rejoindre une room (Client)";
+            alert("Hôte introuvable ou erreur réseau.");
+            btnJoin.innerText = "Rejoindre";
             btnJoin.disabled = false;
-        }, 8000); // J'ai monté un peu le temps à 8 secondes car la recherche d'IP prend du temps
+        }, 8000);
 
         hostConnection.on('open', () => {
             clearTimeout(timeout);
-            btnJoin.innerText = "Rejoindre une room (Client)";
+            btnJoin.innerText = "Rejoindre";
             btnJoin.disabled = false;
             showView('lobby');
         });
@@ -241,22 +298,42 @@ document.getElementById('btn-join').addEventListener('click', () => {
             if (data.type === 'LOBBY_UPDATE') {
                 const list = document.getElementById('players-list');
                 list.innerHTML = '';
-                Object.values(data.players).forEach(p => list.innerHTML += `<li>${p.name}</li>`);
+                Object.values(data.players).forEach(p => list.innerHTML += `<li>${p.name} - Score: ${p.score}</li>`);
             }
             
             if (data.type === 'START_ROUND') {
                 showView('game');
                 document.getElementById('round-info').innerText = `Manche ${data.round}/${data.maxRounds}`;
-                feedbackMessage.innerText = "À vous de jouer !";
+                feedbackMessage.innerText = "Titre (1pt) / Artiste (1pt)";
                 feedbackMessage.style.color = "white";
                 inputAnswer.value = '';
+                inputAnswer.disabled = false;
                 resetTimer();
                 startTimer(ROUND_DURATION);
             }
 
-            if (data.type === 'ROUND_WON') {
-                feedbackMessage.innerText = `🏆 Gagné par ${data.winner} ! \nC'était : ${data.track}`;
-                feedbackMessage.style.color = "#1db954";
+            if (data.type === 'PARTIAL_WIN') {
+                // Quelqu'un a trouvé soit le titre soit l'artiste, mais on continue !
+                feedbackMessage.innerText = data.message + "\nContinuez de chercher le reste !";
+                feedbackMessage.style.color = "#f39c12"; // Orange/Jaune
+                
+                // Met à jour les scores affichés si besoin
+                // (Optionnel, on le garde en mémoire pour la fin de partie)
+            }
+
+            if (data.type === 'ROUND_WON_COMPLETELY') {
+                // Titre et Artiste trouvés !
+                feedbackMessage.innerText = `${data.message}\n\n✅ RÉPONSE : ${data.track}`;
+                feedbackMessage.style.color = "#1db954"; // Vert
+                inputAnswer.disabled = true;
+                resetTimer(); // Arrête visuellement le chrono
+            }
+
+            if (data.type === 'ROUND_TIMEOUT') {
+                // Temps écoulé
+                feedbackMessage.innerText = `⏱️ Temps écoulé !\n\n❌ RÉPONSE : ${data.track}`;
+                feedbackMessage.style.color = "#e74c3c"; // Rouge
+                inputAnswer.disabled = true;
                 resetTimer();
             }
 
@@ -268,8 +345,8 @@ document.getElementById('btn-join').addEventListener('click', () => {
     });
 
     peer.on('error', (err) => {
-        alert('Erreur de connexion. Vérifiez le code ou votre réseau.');
-        btnJoin.innerText = "Rejoindre une room (Client)";
+        alert('Erreur de connexion. Vérifiez le code.');
+        btnJoin.innerText = "Rejoindre";
         btnJoin.disabled = false;
     });
 });
@@ -279,7 +356,6 @@ document.getElementById('btn-submit-answer').addEventListener('click', () => {
     if (hostConnection && hostConnection.open && answer) {
         hostConnection.send({ type: 'SUBMIT_ANSWER', answer: answer });
         inputAnswer.value = '';
-        feedbackMessage.innerText = "Envoyé !";
     }
 });
 
@@ -302,8 +378,6 @@ function startTimer(duration) {
         if (remaining <= 0) {
             clearInterval(timerInterval);
             timerBar.style.width = '0%';
-            feedbackMessage.innerText = "Temps écoulé !";
-            feedbackMessage.style.color = "orange";
         } else {
             timerBar.style.width = (remaining / duration) * 100 + '%';
         }
@@ -319,4 +393,4 @@ function showLeaderboard(playersData) {
     sortedPlayers.forEach((p, index) => {
         list.innerHTML += `<li><strong>#${index + 1} ${p.name}</strong> : ${p.score} pts</li>`;
     });
-}
+                }
